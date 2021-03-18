@@ -74,7 +74,7 @@ readWOF = function(Path) {
     Flattened = as.data.frame(cbind(id,name,placetype,macroregion,region,macrocounty,county,localadmin,locality,borough,neighborhood,geom),stringsAsFactors=FALSE)  
     Flattened = sf::st_as_sf(Flattened,wkt="geom")
     # Write them to the WOF table
-    sf::st_write(dsn=Connection,obj=Flattened,"usa_wof",append=TRUE,row.names=FALSE)
+    sf::st_write(dsn=Connection,obj=Flattened,c("wof","usa_raw"),append=TRUE,row.names=FALSE)
     # Need to close the connection 
     RPostgreSQL::dbDisconnect(Connection)
     return(id)
@@ -89,8 +89,9 @@ readWOF = function(Path) {
 # download.file("https://data.geocode.earth/wof/dist/bundles/whosonfirst-data-admin-us-latest.tar.bz2",destfile="~/Downloads")
 # untar("...")
 
+# Create the 
 # Create the blank table
-dbSendQuery(Mapzen,"CREATE TABLE usa_wof (id bigint,name varchar, placetype varchar, macroregion bigint, region bigint, macrocount bigint, county bigint, localadmin bigint, locality bigint, borough bigint, neighborhood bigint, geom geometry)")
+dbSendQuery(Mapzen,"CREATE TABLE wof.usa_raw (id bigint,name varchar, placetype varchar, macroregion bigint, region bigint, macrocounty bigint, county bigint, localadmin bigint, locality bigint, borough bigint, neighborhood bigint, geom geometry)")
 
 # Get a list of the geojsons
 Metadata = list.files(path="~/Downloads/whosonfirst-data-admin-us-latest/data",pattern="*.geojson",full.names=TRUE,recursive=TRUE)
@@ -119,7 +120,8 @@ stopCluster(Cluster)
 # Gotta make a god damn index and set a primary key for the love of god
 # Could have defined the PKEY when making the table schema a few lines above, but
 # We need to eliminate duplicates first... there are a few ways to do it
-dbSendQuery(Mapzen,"CREATE TABLE cleaned_usa AS SELECT DISTINCT * FROM usa_wof")
-dbSendQuery(Mapzen,"ALTER TABLE cleaned_usa ADD PRIMARY KEY (id);")
-dbSendQuery(Mapzen,"CREATE INDEX ON cleaned_usa USING GiST (geom);") # probably not needed since it is point data
-dbSendQuery(Mapzen,"VACUUM ANALYZE cleaned_usa;")
+dbSendQuery(Mapzen,"CREATE TABLE wof.usa_clean AS SELECT DISTINCT * FROM wof.usa_raw WHERE GeometryType(geom) IS NOT 'POINT'")
+dbSendQuery(Mapzen,"ALTER TABLE wof.usa_clean ADD PRIMARY KEY (id);")
+dbSendQuery(Mapzen,"UPDATE wof.usa_clean SET geom=SetSRID(geom,4326);")
+dbSendQuery(Mapzen,"CREATE INDEX ON wof.usa_clean USING GiST (geom);") # probably not needed since it is point data
+dbSendQuery(Mapzen,"VACUUM ANALYZE;")
