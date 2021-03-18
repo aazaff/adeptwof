@@ -54,7 +54,9 @@ options(timeout=600)
 # Hardcodes a BUNCH of stuff, most notably the database connection parameter
 readWOF = function(Path) {
     Initial = sf::st_read(Path,quiet=TRUE)
-    if ("wof.hierarchy"%in%names(Initial)!=TRUE) {return(NA)}
+    # Making the connection internally is for thh paralleized version
+    Connection<-RPostgreSQL::dbConnect(DBI::dbDriver("PostgreSQL"), dbname = "mapzen", host = "localhost", port = 5432, user = "zaffos")
+    if ("wof.hierarchy"%in%names(Initial)!=TRUE) {RPostgreSQL::dbDisconnect(Connection); return(NA);}
     id = Initial$wof.id
     name = Initial$wof.name
     placetype = Initial$wof.placetype
@@ -66,10 +68,15 @@ readWOF = function(Path) {
     locality = jsonlite::fromJSON(Initial$wof.hierarchy)$locality_id
     borough = jsonlite::fromJSON(Initial$wof.hierarchy)$borough_id
     neighborhood = jsonlite::fromJSON(Initial$wof.hierarchy)$neighborhood_id
-    geom = unlist(st_as_text(Initial$geometry))
+    # I suspect this process of unconverting then converting back the geom could be circumvented by a more intelligent
+    # join of some kind, but I don't want to deal with joining data to an sf object...
+    geom = unlist(sf::st_as_text(Initial$geometry))
     Flattened = as.data.frame(cbind(id,name,placetype,macroregion,region,macrocounty,county,localadmin,locality,borough,neighborhood,geom),stringsAsFactors=FALSE)  
+    Flattened = sf::st_as_sf(Flattened,wkt="geom")
     # Write them to the WOF table
-    sf::st_write(dsn=Mapzen,obj=st_as_sf(Flattened,wkt="geom"),"usa_wof",append=TRUE,row.names=FALSE)
+    sf::st_write(dsn=Connection,obj=Flattened,"usa_wof",append=TRUE,row.names=FALSE)
+    # Need to close the connection 
+    RPostgreSQL::dbDisconnect(Connection)
     return(id)
     }
 
@@ -83,16 +90,36 @@ readWOF = function(Path) {
 # untar("...")
 
 # Create the blank table
-dbSendQuery(Mapzen,"CREATE TABLE usa_wof (id bigint PRIMARY KEY,name varchar, placetype varchar, macroregion bigint, region bigint, macrocount bigint, county bigint, localadmin bigint, locality bigint, borough bigint, neighborhood bigint, geom geometry)")
+dbSendQuery(Mapzen,"CREATE TABLE usa_wof (id bigint,name varchar, placetype varchar, macroregion bigint, region bigint, macrocount bigint, county bigint, localadmin bigint, locality bigint, borough bigint, neighborhood bigint, geom geometry)")
 
 # Get a list of the geojsons
 Metadata = list.files(path="~/Downloads/whosonfirst-data-admin-us-latest/data",pattern="*.geojson",full.names=TRUE,recursive=TRUE)
 
 # Write them into the postgres database
 # Definitely parallelize this if you ever do it again... the i/o is ridic
-Write = pbsapply(Metadata,readWOF)
+# Write = pbsapply(Metadata,readWOF,Mapzen)
+
+###### Start Alternative Parallelized Version ######
+# If running from UW-Madison
+# Load or install the doParallel package
+if (suppressWarnings(require("doParallel"))==FALSE) {
+        install.packages("doParallel",repos="https://cran.microsoft.com/");
+        library("doParallel");
+        }
+
+# Start a cluster for multicore, 3 by default or higher if passed as command line argument
+Cluster<-makeCluster(3)
+clusterExport(cl=Cluster, varlist=c("readWOF"))
+# Upload the geojson into 
+Output<-parSapply(Cluster,Metadata,readWOF)
+# Stop the cluster
+stopCluster(Cluster)
+###### End Alternative Parallelized Version #######
 
 # Gotta make a god damn index and set a primary key for the love of god
-dbSendQuery(Mapzen,"ALTER TABLE usa_wof ADD PRIMARY KEY (id);")
-dbSendQuery(Ecos,"CREATE INDEX ON usa_wof USING GiST (geom);") # probably not needed since it is point data
-dbSendQuery(Mapzen,"VACUUM ANALYZE usa_wof;")
+# Could have defined the PKEY when making the table schema a few lines above, but
+# We need to eliminate duplicates first... there are a few ways to do it
+dbSendQuery(Mapzen,"CREATE TABLE cleaned_usa AS SELECT DISTINCT * FROM usa_wof")
+dbSendQuery(Mapzen,"ALTER TABLE cleaned_usa ADD PRIMARY KEY (id);")
+dbSendQuery(Mapzen,"CREATE INDEX ON cleaned_usa USING GiST (geom);") # probably not needed since it is point data
+dbSendQuery(Mapzen,"VACUUM ANALYZE cleaned_usa;")
