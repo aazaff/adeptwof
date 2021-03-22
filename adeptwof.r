@@ -26,14 +26,19 @@ if (suppressWarnings(require("pbapply"))==FALSE) {
     library("pbapply");
     }
 
+if (suppressWarnings(require("stringr"))==FALSE) {
+    install.packages("stringr",repos="https://cran.microsoft.com/");
+    library("stringr");
+    }
+
 # Establish postgresql connection
 # This assume that you already have a postgres instance with PostGIS installed and a database named mapzen
 # and that you have comparable configuration and credentials
 # This could theoretically be done entirely within R, as the sf packae ports most geoprocessing functions
 # from postgis entirely into R, but the benefit of doing it in postgis is because that allows me to preserve
 # a stable database rather than recreating data constantly 
-Driver<-dbDriver("PostgreSQL") # Establish database driver
-Mapzen<-dbConnect(Driver, dbname = "mapzen", host = "localhost", port = 5432, user = "zaffos")
+Driver = dbDriver("PostgreSQL") # Establish database driver
+Mapzen = dbConnect(Driver, dbname = "mapzen", host = "localhost", port = 5432, user = "zaffos")
 
 # Change the maximum timeout t0 300 second. This will allow you to download larger datafiles from 
 # the paleobiology database.
@@ -55,7 +60,7 @@ options(timeout=600)
 readWOF = function(Path) {
     Initial = sf::st_read(Path,quiet=TRUE)
     # Making the connection internally is for thh paralleized version
-    Connection<-RPostgreSQL::dbConnect(DBI::dbDriver("PostgreSQL"), dbname = "mapzen", host = "localhost", port = 5432, user = "zaffos")
+    Connection = RPostgreSQL::dbConnect(DBI::dbDriver("PostgreSQL"), dbname = "mapzen", host = "localhost", port = 5432, user = "zaffos")
     if ("wof.hierarchy"%in%names(Initial)!=TRUE) {RPostgreSQL::dbDisconnect(Connection); return(NA);}
     id = Initial$wof.id
     name = Initial$wof.name
@@ -109,10 +114,10 @@ if (suppressWarnings(require("doParallel"))==FALSE) {
         }
 
 # Start a cluster for multicore, 3 by default or higher if passed as command line argument
-Cluster<-makeCluster(3)
+Cluster = makeCluster(3)
 clusterExport(cl=Cluster, varlist=c("readWOF"))
 # Upload the geojson into 
-Output<-parSapply(Cluster,Metadata,readWOF)
+Output = parSapply(Cluster,Metadata,readWOF)
 # Stop the cluster
 stopCluster(Cluster)
 ###### End Alternative Parallelized Version #######
@@ -120,8 +125,44 @@ stopCluster(Cluster)
 # Gotta make a god damn index and set a primary key for the love of god
 # Could have defined the PKEY when making the table schema a few lines above, but
 # We need to eliminate duplicates first... there are a few ways to do it
-dbSendQuery(Mapzen,"CREATE TABLE wof.usa_clean AS SELECT DISTINCT * FROM wof.usa_raw WHERE GeometryType(geom) IS NOT 'POINT'")
+dbSendQuery(Mapzen,"CREATE TABLE wof.usa_clean AS SELECT DISTINCT * FROM wof.usa_raw WHERE region>0")
+dbSendQuery(Mapzen,"DELETE FROM wof.usa_clean AS A USING wof.usa_clean AS B WHERE A.ctid < B.ctid AND A.id=B.id;")
 dbSendQuery(Mapzen,"ALTER TABLE wof.usa_clean ADD PRIMARY KEY (id);")
-dbSendQuery(Mapzen,"UPDATE wof.usa_clean SET geom=SetSRID(geom,4326);")
+dbSendQuery(Mapzen,"UPDATE wof.usa_clean SET geom=ST_SetSRID(geom,4326);")
 dbSendQuery(Mapzen,"CREATE INDEX ON wof.usa_clean USING GiST (geom);") # probably not needed since it is point data
 dbSendQuery(Mapzen,"VACUUM ANALYZE;")
+
+#############################################################################################################
+########################################### DOWNLOAD XDD DOCS, GET ##########################################
+#############################################################################################################
+# Initiate a join
+matchCounty = function(Locations) {
+    Subquery = paste('(SELECT * FROM wof.usa_clean WHERE id IN (',Locations,'))')
+    Query = paste("WITH candidates AS",Subquery,"SELECT A.id,A.name,A.placetype,A.region,B.id,B.name,B.placetype,B.region FROM candidates AS A JOIN candidates AS B ON ST_Intersects(ST_MakeValid(A.geom),ST_MakeValid(B.geom)) AND A.id!=B.id AND B.placetype='county'")
+    Matches = dbGetQuery(Mapzen,Query)
+    return(Matches)
+    }
+
+########################################## DOWNLOAD XDD DOCS, GET ##########################################
+# Get the documents
+Documents = jsonlite::fromJSON("https://xdd.wisc.edu/api/products?api_key=6157d2c4-3a2d-4034-b882-77c5237692d4&products=scienceparse")
+Text = Documents$success$data$results$scienceparse$metadata$sections
+Metadata = Documents$success$data$results$bibjson
+
+# Select regions
+Regions = dbGetQuery(Mapzen,"SELECT id, name FROM wof.usa_clean WHERE placetype='region'")
+RegionHits = sapply(Regions[,"name"],function(x) sum(stringr::str_count(Text[[166]][,"text"],pattern=x)))
+Regions[which(RegionHits>0),"id"]
+# Test for regions
+Locations = dbGetQuery(Mapzen,"SELECT id, name, placetype FROM wof.usa_clean WHERE placetype!='region' AND region IN (85688481, 85688535, 85688579, 85688603, 85688623, 85688641, 85688675, 85688683, 85688701, 85688747)")
+# Clar out (historical), ugh
+Locations$name = gsub('\\ \\(historical\\)',"",Locations$name)
+Locations$name = gsub('[:punct:]',"",Locations$name)
+Locations$name = gsub("\\s*(\\([^()]*(?:(?1)[^()]*)*\\))", "", Locations$name, perl=TRUE)
+Locations$name = gsub(')',"",Locations$name)
+# Check for locations hits
+Subregional = apply(Locations,1,function(x) stringr::str_count(Text[[166]][,"text"],pattern=x["name"]))
+Subregional = Locations[Subregional>0,c("id","name")]
+
+# Get the "intersects" option
+AdjacentLocations = matchConty(paste(unique(Locations[,1]),collapse=","))
