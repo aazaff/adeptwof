@@ -135,24 +135,48 @@ dbSendQuery(Mapzen,"VACUUM ANALYZE;")
 #############################################################################################################
 ########################################### DOWNLOAD XDD DOCS, GET ##########################################
 #############################################################################################################
+# Some regex bullshit
+cleanSubregions = function(Subregions) {
+    Subregions$name = gsub('\\ \\(historical\\)',"",Subregions$name)
+    Subregions$name = gsub('[:punct:]',"",Subregions$name)
+    Subregions$name = gsub("\\s*(\\([^()]*(?:(?1)[^()]*)*\\))", "", Subregions$name, perl=TRUE)
+    Subregions$name = gsub(')',"",Subregions$name)
+    return(Subregions)
+    }
+
+matchSubregional = function(Text) {
+    Regions = dbGetQuery(Mapzen,"SELECT id, name FROM wof.usa_clean WHERE placetype='region'")
+    RegionHits = sapply(Regions[,"name"],function(x) sum(stringr::str_count(Text,pattern=x)))
+    Regions = Regions[which(RegionHits>0),"id"]
+    Query = "SELECT id, name, placetype, county, region FROM wof.usa_clean WHERE placetype!='region' AND region IN ("
+    Query = paste0(Query,paste(Regions,collapse=","),');')
+    Subregions = dbGetQuery(Mapzen,Query)
+    Subregions = cleanSubregions(Subregions)
+    # Check for locations hits
+    Subregional = pbsapply(Subregions$name,1,function(x) stringr::str_count(Text,pattern=x))
+    Result = Subregions[Subregional>0,c("id","name","placetype","county","region")]
+    return(Result)
+    }
+
 # Initiate a join
 matchCounty = function(Locations) {
-    Subquery = paste('(SELECT * FROM wof.usa_clean WHERE id IN (',Locations,'))')
-    Query = paste("WITH candidates AS",Subquery,"SELECT A.id,A.name,A.placetype,A.region,B.id,B.name,B.placetype,B.region FROM candidates AS A JOIN candidates AS B ON ST_Intersects(ST_MakeValid(A.geom),ST_MakeValid(B.geom)) AND A.id!=B.id AND B.placetype='county'")
+    Counties = paste(unique(na.omit(Locations$county)),collapse=",")
+    Subquery = paste('(SELECT * FROM wof.usa_clean WHERE id IN (',Counties,'))')
+    Query = paste("WITH candidates AS",Subquery,"SELECT A.id,A.name,A.placetype,A.region,B.id,B.name,B.placetype,B.region FROM candidates AS A JOIN candidates AS B ON ST_Intersects(ST_MakeValid(A.geom),ST_MakeValid(B.geom)) AND A.id!=B.id")
     Matches = dbGetQuery(Mapzen,Query)
     return(Matches)
     }
 
 ########################################## DOWNLOAD XDD DOCS, GET ##########################################
 # Get the documents
-Documents = jsonlite::fromJSON("https://xdd.wisc.edu/api/products?api_key=6157d2c4-3a2d-4034-b882-77c5237692d4&products=scienceparse")
+Documents = jsonlite::fromJSON("https://xdd.wisc.edu/api/products?api_key=5eda7896-602d-4131-9c4b-7241cb7f1f06&products=scienceparse")
 Text = Documents$success$data$results$scienceparse$metadata$sections
 Metadata = Documents$success$data$results$bibjson
 
 # Select regions
 Regions = dbGetQuery(Mapzen,"SELECT id, name FROM wof.usa_clean WHERE placetype='region'")
 RegionHits = sapply(Regions[,"name"],function(x) sum(stringr::str_count(Text[[166]][,"text"],pattern=x)))
-Regions[which(RegionHits>0),"id"]
+Regions = Regions[which(RegionHits>0),"id"]
 # Test for regions
 Locations = dbGetQuery(Mapzen,"SELECT id, name, placetype FROM wof.usa_clean WHERE placetype!='region' AND region IN (85688481, 85688535, 85688579, 85688603, 85688623, 85688641, 85688675, 85688683, 85688701, 85688747)")
 # Clar out (historical), ugh
